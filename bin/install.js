@@ -30,30 +30,38 @@ function patch(src, name, value) {
   );
 }
 
+const SECTIONS = [
+  {
+    label: "Session context window",
+    warnKey: "CONTEXT_WARN",     warnDef: 20,
+    dangerKey: "CONTEXT_DANGER", dangerDef: 50,
+  },
+  {
+    label: "5-hour usage allowance",
+    warnKey: "USAGE_5H_WARN",     warnDef: 50,
+    dangerKey: "USAGE_5H_DANGER", dangerDef: 90,
+  },
+  {
+    label: "7-day usage allowance",
+    warnKey: "USAGE_7D_WARN",     warnDef: 50,
+    dangerKey: "USAGE_7D_DANGER", dangerDef: 90,
+  },
+];
+
+function showDefaults() {
+  console.log("\nDefault thresholds:");
+  for (const { label, warnDef, dangerDef } of SECTIONS) {
+    console.log(`  ${label.padEnd(26)}  warn ${warnDef}%  →  danger ${dangerDef}%`);
+  }
+  console.log();
+}
+
 async function promptThresholds() {
-  console.log("\nSet color thresholds (press Enter to accept the default):\n");
-
-  const sections = [
-    {
-      label: "Session context window",
-      warnKey: "CONTEXT_WARN",   warnDef: 20,
-      dangerKey: "CONTEXT_DANGER", dangerDef: 50,
-    },
-    {
-      label: "5-hour usage allowance",
-      warnKey: "USAGE_5H_WARN",   warnDef: 50,
-      dangerKey: "USAGE_5H_DANGER", dangerDef: 90,
-    },
-    {
-      label: "7-day usage allowance",
-      warnKey: "USAGE_7D_WARN",   warnDef: 50,
-      dangerKey: "USAGE_7D_DANGER", dangerDef: 90,
-    },
-  ];
-
   const values = {};
 
-  for (const { label, warnKey, warnDef, dangerKey, dangerDef } of sections) {
+  console.log("Set your thresholds (press Enter to accept each default):\n");
+
+  for (const { label, warnKey, warnDef, dangerKey, dangerDef } of SECTIONS) {
     console.log(`${label}:`);
     let warnVal, dangerVal;
 
@@ -89,6 +97,15 @@ async function promptThresholds() {
   return values;
 }
 
+function defaultThresholds() {
+  return Object.fromEntries(
+    SECTIONS.flatMap(({ warnKey, warnDef, dangerKey, dangerDef }) => [
+      [warnKey, warnDef],
+      [dangerKey, dangerDef],
+    ])
+  );
+}
+
 function installScript(thresholds) {
   let src = fs.readFileSync(SCRIPT_SRC, "utf8");
   for (const [name, value] of Object.entries(thresholds)) {
@@ -117,7 +134,13 @@ function patchSettings() {
 console.log("Claude Code Statusline Installer");
 console.log("================================");
 
-const thresholds = await promptThresholds();
+showDefaults();
+
+const customize = await ask("Customize thresholds? [y/N]: ");
+const thresholds = /^y/i.test(customize.trim())
+  ? await promptThresholds()
+  : defaultThresholds();
+
 rl.close();
 
 console.log("Installing...");
