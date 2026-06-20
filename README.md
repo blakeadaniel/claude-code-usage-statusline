@@ -19,6 +19,19 @@ The bar colors shift green → yellow → red as you approach configurable warni
 
 The 5h and 7d gauges are fetched from Anthropic's rate-limit response headers and cached for 60 seconds in the background so they don't slow down the status line render.
 
+## Responsive sizing
+
+The status line adapts to your terminal width. The context bar grows and shrinks to fill the available space, and lower-priority segments drop off as the window narrows:
+
+| Terminal width | What's shown |
+|---|---|
+| Wide | Full bar + `5h` + `7d` gauges |
+| Narrower | `7d` gauge drops |
+| Narrower still | both gauges drop, token detail stays |
+| Narrow | token detail drops — model, bar, and `%` remain |
+
+Width is read from the controlling terminal at render time (`stty size`, falling back to `$COLUMNS`, `tput cols`, then `80`). Note that Claude Code re-runs the status line on activity and on a periodic idle refresh — not on terminal resize events — so after resizing, the new width is picked up on the next refresh rather than instantly.
+
 ## Install
 
 ```sh

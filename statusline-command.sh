@@ -53,14 +53,30 @@ fi
 LIMITS_JSON=""
 [[ -f "$LIMITS_CACHE" ]] && LIMITS_JSON=$(cat "$LIMITS_CACHE")
 
+# ── Terminal width detection ─────────────────────────────────────────────────
+# The statusLine command is spawned with stdout piped, so query the controlling
+# terminal directly. Fall back through $COLUMNS, tput, then a sane default.
+COLS=$(stty size </dev/tty 2>/dev/null | awk '{print $2}')
+[[ "$COLS" =~ ^[0-9]+$ ]] || COLS="${COLUMNS:-}"
+[[ "$COLS" =~ ^[0-9]+$ ]] || COLS=$(tput cols 2>/dev/null)
+[[ "$COLS" =~ ^[0-9]+$ ]] || COLS=80
+
 # ── Render ────────────────────────────────────────────────────────────────────
 EFFORT="${CLAUDE_EFFORT:-?}" \
 LIMITS_JSON="$LIMITS_JSON" \
+COLS="$COLS" \
 python3 - "$input" <<'PY'
-import json, os, sys, datetime
+import json, os, re, sys, datetime
 
 CONTEXT_MAX = 1_000_000
-BAR_WIDTH    = 20
+MIN_BAR      = 6     # narrowest the context bar ever shrinks to
+MAX_BAR      = 40    # widest it grows on roomy terminals
+COLS         = int(os.environ.get("COLS") or 80)
+
+_ANSI = re.compile(r"\033\[[0-9;]*m")
+def vis(s):
+    """Visible length of a string, ignoring ANSI color escapes."""
+    return len(_ANSI.sub("", s))
 
 # Thresholds: fraction at which the bar transitions green→yellow (warn) and yellow→red (danger)
 CONTEXT_WARN   = 0.20
@@ -150,28 +166,30 @@ def fmt_countdown(ts):
     d, rem = divmod(secs, 86400)
     return f"{d}d{rem // 3600}h"
 
-# ── Context window bar ────────────────────────────────────────────────────────
-parts = [f"{BOLD}{model}{RESET}", f"{GREY}[{effort}]{RESET}"]
-
-if used is not None:
-    frac   = used / CONTEXT_MAX
-    pct    = frac * 100
-    filled = max(0, min(BAR_WIDTH, round(frac * BAR_WIDTH)))
+# ── Build the context bar at an arbitrary width ──────────────────────────────
+def context_bar(width):
+    if used is None:
+        return f"{GREY}{'░' * width}{RESET}"
+    filled = max(0, min(width, round(frac * width)))
     cells  = []
-    for j in range(BAR_WIDTH):
+    for j in range(width):
         if j < filled:
-            cells.append(f"{color_for((j + 1) / BAR_WIDTH, warn=CONTEXT_WARN, danger=CONTEXT_DANGER)}█")
+            cells.append(f"{color_for((j + 1) / width, warn=CONTEXT_WARN, danger=CONTEXT_DANGER)}█")
         else:
             cells.append(f"{GREY}░")
-    bar = "".join(cells) + RESET
-    clr = color_for(frac, warn=CONTEXT_WARN, danger=CONTEXT_DANGER)
-    parts.append(f"[{bar}]")
-    parts.append(f"{clr}{pct:.0f}%{RESET}")
-    parts.append(f"{GREY}{kfmt(used)} / {kfmt(CONTEXT_MAX)} tokens{RESET}")
+    return "".join(cells) + RESET
+
+# Pre-build the fixed text fragments (these don't change with terminal width).
+header = f"{BOLD}{model}{RESET} {GREY}[{effort}]{RESET}"
+
+if used is not None:
+    frac       = used / CONTEXT_MAX
+    pct_txt    = f"{color_for(frac, warn=CONTEXT_WARN, danger=CONTEXT_DANGER)}{frac * 100:.0f}%{RESET}"
+    tokens_txt = f"{GREY}{kfmt(used)} / {kfmt(CONTEXT_MAX)} tokens{RESET}"
 else:
-    empty = f"{GREY}{'░' * BAR_WIDTH}{RESET}"
-    parts.append(f"[{empty}]")
-    parts.append(f"{GREY}-- / {kfmt(CONTEXT_MAX)} tokens{RESET}")
+    frac       = 0.0
+    pct_txt    = ""
+    tokens_txt = f"{GREY}-- / {kfmt(CONTEXT_MAX)} tokens{RESET}"
 
 # ── 5h / 7d from Anthropic unified rate-limit headers ────────────────────────
 SEP = f"  {GREY}│{RESET}  "
@@ -183,26 +201,57 @@ if limits_raw:
     except Exception:
         pass
 
-u5h    = h.get("anthropic-ratelimit-unified-5h-utilization")
-u7d    = h.get("anthropic-ratelimit-unified-7d-utilization")
-reset5 = h.get("anthropic-ratelimit-unified-5h-reset")
-reset7 = h.get("anthropic-ratelimit-unified-7d-reset")
+def usage_section(label, util, warn, danger, reset):
+    if util is None:
+        return None
+    frac_u = float(util)
+    clr    = usage_color(frac_u, warn, danger)
+    pct    = f"{clr}{frac_u * 100:.0f}%{RESET}"
+    bar    = usage_bar(frac_u, warn, danger)
+    cd     = f" {GREY}{fmt_countdown(reset)}{RESET}" if reset else ""
+    return f"{SEP}{GREY}{label}:{RESET} {bar} {pct}{cd}"
 
-if u5h is not None:
-    frac5 = float(u5h)
-    clr5  = usage_color(frac5, USAGE_5H_WARN, USAGE_5H_DANGER)
-    pct5  = f"{clr5}{frac5 * 100:.0f}%{RESET}"
-    b5    = usage_bar(frac5, USAGE_5H_WARN, USAGE_5H_DANGER)
-    cd5   = f" {GREY}{fmt_countdown(reset5)}{RESET}" if reset5 else ""
-    parts.append(f"{SEP}{GREY}5h:{RESET} {b5} {pct5}{cd5}")
+sec5 = usage_section("5h", h.get("anthropic-ratelimit-unified-5h-utilization"),
+                     USAGE_5H_WARN, USAGE_5H_DANGER,
+                     h.get("anthropic-ratelimit-unified-5h-reset"))
+sec7 = usage_section("7d", h.get("anthropic-ratelimit-unified-7d-utilization"),
+                     USAGE_7D_WARN, USAGE_7D_DANGER,
+                     h.get("anthropic-ratelimit-unified-7d-reset"))
 
-if u7d is not None:
-    frac7 = float(u7d)
-    clr7  = usage_color(frac7, USAGE_7D_WARN, USAGE_7D_DANGER)
-    pct7  = f"{clr7}{frac7 * 100:.0f}%{RESET}"
-    b7    = usage_bar(frac7, USAGE_7D_WARN, USAGE_7D_DANGER)
-    cd7   = f" {GREY}{fmt_countdown(reset7)}{RESET}" if reset7 else ""
-    parts.append(f"{SEP}{GREY}7d:{RESET} {b7} {pct7}{cd7}")
+# ── Responsive assembly ──────────────────────────────────────────────────────
+def assemble(bar_w, with_tokens, with5, with7):
+    s = f"{header} [{context_bar(bar_w)}]"
+    if pct_txt:
+        s += f" {pct_txt}"
+    if with_tokens:
+        s += f" {tokens_txt}"
+    if with5 and sec5:
+        s += sec5
+    if with7 and sec7:
+        s += sec7
+    return s
 
-sys.stdout.write(" ".join(parts))
+# Leave a 1-column margin; never demand less than header + a minimum bar fits.
+budget = max(vis(header) + MIN_BAR + 4, COLS - 1)
+
+def fits(bw, t, a, b):
+    return vis(assemble(bw, t, a, b)) <= budget
+
+# Greedily enable optional segments at the minimum bar width, in priority order:
+# context token detail → 5h gauge → 7d gauge. When usage is unknown the token
+# label is the only context detail, so it is always shown.
+with_tokens = used is None
+with5 = with7 = False
+if used is not None and fits(MIN_BAR, True, with5, with7):
+    with_tokens = True
+if sec5 and fits(MIN_BAR, with_tokens, True, with7):
+    with5 = True
+if sec7 and fits(MIN_BAR, with_tokens, with5, True):
+    with7 = True
+
+# Grow the context bar to soak up whatever horizontal room is left.
+used_cols = vis(assemble(MIN_BAR, with_tokens, with5, with7))
+bar_w     = max(MIN_BAR, min(MAX_BAR, MIN_BAR + (budget - used_cols)))
+
+sys.stdout.write(assemble(bar_w, with_tokens, with5, with7))
 PY
